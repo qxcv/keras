@@ -56,13 +56,15 @@ def test_dropout(layer_class):
                input_shape=(nb_samples, timesteps, embedding_dim))
 
 
-@pytest.skip
-@rnn_test
-def test_layer_norm(layer_class):
-    # TODO: probably want to take out the mode thing later for consistency with
-    # dropout (tests will be very slow otherwise)
+# TODO: replace with @rnn_test once I implement layer norm for GRU, SimpleRNN,
+# etc.
+# @rnn_test
+# def test_layer_norm(layer_class):
+@keras_test
+def test_layer_norm():
     for mode in ['cpu', 'mem', 'gpu']:
-        layer_test(layer_class,
+        # layer_test(layer_class,
+        layer_test(recurrent.LSTM,
                 kwargs={'output_dim': output_dim,
                         'layer_norm': True,
                         'consume_less': mode},

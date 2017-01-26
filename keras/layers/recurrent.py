@@ -894,12 +894,12 @@ class LSTM(Recurrent):
             return std * alpha + beta
 
         if self.consume_less == 'gpu':
-            x_z = K.dot(x * B_W[0], self.W)
-            h_z = K.dot(h_tm1 * B_U[0], self.U)
+            z_x = K.dot(x * B_W[0], self.W)
+            z_h = K.dot(h_tm1 * B_U[0], self.U)
             if self.layer_norm:
-                x_z = ln(x_z, self.x_z_alpha, self.x_z_beta)
-                h_z = ln(h_z, self.h_z_alpha, self.h_z_beta)
-            z = x_z + h_z + self.b
+                z_x = ln(z_x, self.z_x_alpha, self.z_x_beta)
+                z_h = ln(z_h, self.z_h_alpha, self.z_h_beta)
+            z = z_x + z_h + self.b
 
             z0 = z[:, :self.output_dim]
             z1 = z[:, self.output_dim: 2 * self.output_dim]
