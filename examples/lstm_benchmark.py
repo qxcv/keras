@@ -30,7 +30,7 @@ max_length = 80
 embedding_dim = 256
 batch_size = 128
 epochs = 10
-modes = ['cpu', 'mem', 'gpu']
+modes = [(mode, ln) for mode in ['cpu', 'mem', 'gpu'] for ln in [True, False]]
 
 print('Loading data...')
 (X_train, y_train), (X_test, y_test) = imdb.load_data(nb_words=max_features)
@@ -39,8 +39,8 @@ X_test = sequence.pad_sequences(X_test, max_length)
 
 # Compile and train different models while meauring performance.
 results = []
-for mode in modes:
-    print('Testing mode: consume_less="{}"'.format(mode))
+for mode, ln in modes:
+    print('Testing mode: consume_less="{}", layer_norm={}'.format(mode, ln))
 
     model = Sequential()
     model.add(Embedding(max_features, embedding_dim, input_length=max_length, dropout=0.2))
@@ -72,12 +72,15 @@ ax2.set_xlabel('Epochs')
 ax3 = plt.subplot2grid((2, 2), (0, 1), rowspan=2)
 ax3.set_title('Time')
 ax3.set_ylabel('Seconds')
-for mode, result in zip(modes, results):
-    ax1.plot(result[0].epoch, result[0].history['val_acc'], label=mode)
-    ax2.plot(result[0].epoch, result[0].history['val_loss'], label=mode)
+labels = []
+for mode_tuple, result in zip(modes, results):
+    label = '%s (ln=%s)' % mode_tuple
+    labels.append(label)
+    ax1.plot(result[0].epoch, result[0].history['val_acc'], label=label)
+    ax2.plot(result[0].epoch, result[0].history['val_loss'], label=label)
 ax1.legend()
 ax2.legend()
 ax3.bar(np.arange(len(results)), [x[1] for x in results],
-        tick_label=modes, align='center')
+        tick_label=labels, align='center')
 plt.tight_layout()
 plt.show()
