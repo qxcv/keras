@@ -659,6 +659,8 @@ class LSTM(Recurrent):
             Can be the name of an existing function (str),
             or a Theano function (see: [activations](../activations.md)).
         inner_activation: activation function for the inner cells.
+        layer_norm: whether to apply layer normalization.
+        epsilon: variance offset for numeric stability in layer normalization.
         W_regularizer: instance of [WeightRegularizer](../regularizers.md)
             (eg. L1 or L2 regularization), applied to the input weights matrices.
         U_regularizer: instance of [WeightRegularizer](../regularizers.md)
@@ -673,12 +675,14 @@ class LSTM(Recurrent):
         - [Learning to forget: Continual prediction with LSTM](http://www.mitpressjournals.org/doi/pdf/10.1162/089976600300015015)
         - [Supervised sequence labeling with recurrent neural networks](http://www.cs.toronto.edu/~graves/preprint.pdf)
         - [A Theoretically Grounded Application of Dropout in Recurrent Neural Networks](http://arxiv.org/abs/1512.05287)
+        - [Layer normalization](https://arxiv.org/pdf/1607.06450.pdf)
     """
 
     def __init__(self, output_dim,
                  init='glorot_uniform', inner_init='orthogonal',
                  forget_bias_init='one', activation='tanh',
                  inner_activation='hard_sigmoid',
+                 layer_norm=False, epsilon=1e-3,
                  W_regularizer=None, U_regularizer=None, b_regularizer=None,
                  dropout_W=0., dropout_U=0., **kwargs):
         self.output_dim = output_dim
@@ -687,6 +691,8 @@ class LSTM(Recurrent):
         self.forget_bias_init = initializations.get(forget_bias_init)
         self.activation = activations.get(activation)
         self.inner_activation = activations.get(inner_activation)
+        self.layer_norm = layer_norm
+        self.epsilon = epsilon
         self.W_regularizer = regularizers.get(W_regularizer)
         self.U_regularizer = regularizers.get(U_regularizer)
         self.b_regularizer = regularizers.get(b_regularizer)
@@ -706,6 +712,32 @@ class LSTM(Recurrent):
         else:
             # initial states: 2 all-zero tensors of shape (output_dim)
             self.states = [None, None]
+
+        if self.layer_norm:
+            self.c_alpha = self.add_weight((self.output_dim,),
+                                           initializer='one',
+                                           name='{}_c_alpha'.format(self.name),
+                                           regularizer=self.U_regularizer)
+            self.c_beta = self.add_weight((self.output_dim,),
+                                          initializer='zero',
+                                          name='{}_c_beta'.format(self.name),
+                                          regularizer=self.b_regularizer)
+            self.z_x_alpha = self.add_weight((4*self.output_dim,),
+                                             initializer='one',
+                                             name='{}_z_x_alpha'.format(self.name),
+                                             regularizer=self.U_regularizer)
+            self.z_x_beta = self.add_weight((4*self.output_dim,),
+                                            initializer='zero',
+                                            name='{}_z_x_beta'.format(self.name),
+                                            regularizer=self.b_regularizer)
+            self.z_h_alpha = self.add_weight((4*self.output_dim,),
+                                             initializer='one',
+                                             name='{}_z_h_alpha'.format(self.name),
+                                             regularizer=self.U_regularizer)
+            self.z_h_beta = self.add_weight((4*self.output_dim,),
+                                            initializer='zero',
+                                            name='{}_z_h_beta'.format(self.name),
+                                            regularizer=self.b_regularizer)
 
         if self.consume_less == 'gpu':
             self.W = self.add_weight((self.input_dim, 4 * self.output_dim),
@@ -781,9 +813,33 @@ class LSTM(Recurrent):
                                       self.W_c, self.U_c, self.b_c,
                                       self.W_f, self.U_f, self.b_f,
                                       self.W_o, self.U_o, self.b_o]
+            if self.layer_norm:
+                self.trainable_weights += [self.c_alpha,   self.c_beta,
+                                           self.z_x_alpha, self.z_x_beta,
+                                           self.z_h_alpha, self.z_h_beta]
             self.W = K.concatenate([self.W_i, self.W_f, self.W_c, self.W_o])
             self.U = K.concatenate([self.U_i, self.U_f, self.U_c, self.U_o])
             self.b = K.concatenate([self.b_i, self.b_f, self.b_c, self.b_o])
+
+            if self.layer_norm:
+                self.z_h_alpha_i = self.z_h_alpha[:self.output_dim]
+                self.z_h_beta_i = self.z_h_beta[:self.output_dim]
+                self.z_h_alpha_f = self.z_h_alpha[self.output_dim:2*self.output_dim]
+                self.z_h_beta_f = self.z_h_beta[self.output_dim:2*self.output_dim]
+                self.z_h_alpha_c = self.z_h_alpha[2*self.output_dim:3*self.output_dim]
+                self.z_h_beta_c = self.z_h_beta[2*self.output_dim:3*self.output_dim]
+                self.z_h_alpha_o = self.z_h_alpha[3*self.output_dim:]
+                self.z_h_beta_o = self.z_h_beta[3*self.output_dim:]
+
+                if self.consume_less == 'mem':
+                    self.z_x_alpha_i = self.z_x_alpha[:self.output_dim]
+                    self.z_x_beta_i = self.z_x_beta[:self.output_dim]
+                    self.z_x_alpha_f = self.z_x_alpha[self.output_dim:2*self.output_dim]
+                    self.z_x_beta_f = self.z_x_beta[self.output_dim:2*self.output_dim]
+                    self.z_x_alpha_c = self.z_x_alpha[2*self.output_dim:3*self.output_dim]
+                    self.z_x_beta_c = self.z_x_beta[2*self.output_dim:3*self.output_dim]
+                    self.z_x_alpha_o = self.z_x_alpha[3*self.output_dim:]
+                    self.z_x_beta_o = self.z_x_beta[3*self.output_dim:]
 
         if self.initial_weights is not None:
             self.set_weights(self.initial_weights)
@@ -833,8 +889,17 @@ class LSTM(Recurrent):
         B_U = states[2]
         B_W = states[3]
 
+        def ln(a, alpha, beta):
+            std = (a - K.mean(a)) / K.sqrt(K.var(a) + self.epsilon)
+            return std * alpha + beta
+
         if self.consume_less == 'gpu':
-            z = K.dot(x * B_W[0], self.W) + K.dot(h_tm1 * B_U[0], self.U) + self.b
+            x_z = K.dot(x * B_W[0], self.W)
+            h_z = K.dot(h_tm1 * B_U[0], self.U)
+            if self.layer_norm:
+                x_z = ln(x_z, self.x_z_alpha, self.x_z_beta)
+                h_z = ln(h_z, self.h_z_alpha, self.h_z_beta)
+            z = x_z + h_z + self.b
 
             z0 = z[:, :self.output_dim]
             z1 = z[:, self.output_dim: 2 * self.output_dim]
@@ -847,24 +912,52 @@ class LSTM(Recurrent):
             o = self.inner_activation(z3)
         else:
             if self.consume_less == 'cpu':
-                x_i = x[:, :self.output_dim]
-                x_f = x[:, self.output_dim: 2 * self.output_dim]
-                x_c = x[:, 2 * self.output_dim: 3 * self.output_dim]
-                x_o = x[:, 3 * self.output_dim:]
+                if self.layer_norm:
+                    x_ln = ln(x, self.z_x_alpha, self.z_x_beta)
+                else:
+                    x_ln = x
+                x_i = x_ln[:, :self.output_dim]
+                x_f = x_ln[:, self.output_dim: 2 * self.output_dim]
+                x_c = x_ln[:, 2 * self.output_dim: 3 * self.output_dim]
+                x_o = x_ln[:, 3 * self.output_dim:]
             elif self.consume_less == 'mem':
-                x_i = K.dot(x * B_W[0], self.W_i) + self.b_i
-                x_f = K.dot(x * B_W[1], self.W_f) + self.b_f
-                x_c = K.dot(x * B_W[2], self.W_c) + self.b_c
-                x_o = K.dot(x * B_W[3], self.W_o) + self.b_o
+                x_i = K.dot(x * B_W[0], self.W_i)
+                x_f = K.dot(x * B_W[1], self.W_f)
+                x_c = K.dot(x * B_W[2], self.W_c)
+                x_o = K.dot(x * B_W[3], self.W_o)
+                if self.layer_norm:
+                    x_i = ln(x_i, self.z_x_alpha_i, self.z_x_beta_i)
+                    x_f = ln(x_f, self.z_x_alpha_f, self.z_x_beta_f)
+                    x_c = ln(x_c, self.z_x_alpha_c, self.z_x_beta_c)
+                    x_o = ln(x_o, self.z_x_alpha_o, self.z_x_beta_i)
+                x_i += self.b_i
+                x_f += self.b_f
+                x_c += self.b_c
+                x_o += self.b_o
             else:
                 raise ValueError('Unknown `consume_less` mode.')
 
-            i = self.inner_activation(x_i + K.dot(h_tm1 * B_U[0], self.U_i))
-            f = self.inner_activation(x_f + K.dot(h_tm1 * B_U[1], self.U_f))
-            c = f * c_tm1 + i * self.activation(x_c + K.dot(h_tm1 * B_U[2], self.U_c))
-            o = self.inner_activation(x_o + K.dot(h_tm1 * B_U[3], self.U_o))
+            h_i = K.dot(h_tm1 * B_U[0], self.U_i)
+            h_f = K.dot(h_tm1 * B_U[1], self.U_f)
+            h_c = K.dot(h_tm1 * B_U[2], self.U_c)
+            h_o = K.dot(h_tm1 * B_U[3], self.U_o)
 
-        h = o * self.activation(c)
+            if self.layer_norm:
+                h_i = ln(h_i, self.z_h_alpha_i, self.z_h_beta_i)
+                h_f = ln(h_f, self.z_h_alpha_f, self.z_h_beta_f)
+                h_c = ln(h_c, self.z_h_alpha_c, self.z_h_beta_c)
+                h_o = ln(h_o, self.z_h_alpha_o, self.z_h_beta_o)
+
+            i = self.inner_activation(x_i + h_i)
+            f = self.inner_activation(x_f + h_f)
+            c = f * c_tm1 + i * self.activation(x_c + h_c)
+            o = self.inner_activation(x_o + h_o)
+
+        if self.layer_norm:
+            c_ln = ln(c, self.c_alpha, self.c_beta)
+        else:
+            c_ln = c
+        h = o * self.activation(c_ln)
         return h, [h, c]
 
     def get_constants(self, x):
@@ -895,6 +988,8 @@ class LSTM(Recurrent):
                   'forget_bias_init': self.forget_bias_init.__name__,
                   'activation': self.activation.__name__,
                   'inner_activation': self.inner_activation.__name__,
+                  'layer_norm': self.layer_norm,
+                  'epsilon': self.epsilon,
                   'W_regularizer': self.W_regularizer.get_config() if self.W_regularizer else None,
                   'U_regularizer': self.U_regularizer.get_config() if self.U_regularizer else None,
                   'b_regularizer': self.b_regularizer.get_config() if self.b_regularizer else None,

@@ -56,6 +56,19 @@ def test_dropout(layer_class):
                input_shape=(nb_samples, timesteps, embedding_dim))
 
 
+@pytest.skip
+@rnn_test
+def test_layer_norm(layer_class):
+    # TODO: probably want to take out the mode thing later for consistency with
+    # dropout (tests will be very slow otherwise)
+    for mode in ['cpu', 'mem', 'gpu']:
+        layer_test(layer_class,
+                kwargs={'output_dim': output_dim,
+                        'layer_norm': True,
+                        'consume_less': mode},
+                input_shape=(nb_samples, timesteps, embedding_dim))
+
+
 @rnn_test
 def test_implementation_mode(layer_class):
     for mode in ['cpu', 'mem', 'gpu']:
